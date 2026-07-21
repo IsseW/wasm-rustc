@@ -1,10 +1,10 @@
 # Build a cranelift-backed rustc.wasm + sysroots and (optionally) publish them as a Release.
 #
-# Runs on the free ubuntu-latest runner (~3.5 h, under the 6 h cap). The recipe mirrors the proven
-# oligamiq/rust_wasm workflow: reclaim disk, add swap, download WASI SDK 24, and use a PREBUILT host
-# LLVM via `toolchain-for-building-rustc --only-llvm` (so LLVM is never compiled from source, which
-# a hosted runner cannot do). See docs/BUILDING.md. Several artifact paths are marked TODO — verify
-# them against compile_rustc_for_wasm20's build layout on the first run.
+# bjorn3/rust's compile_rustc_for_wasm20 branch already ships a `bootstrap.toml` configured for this:
+#   host = ["wasm32-wasip1"], per-target codegen-backends = ["cranelift"], and download-ci-llvm = true
+#   (a PREBUILT LLVM is downloaded — no LLVM is compiled from source). It expects WASI SDK 32.0.
+# So the build is just: fetch WASI SDK 32, then `x.py install`. No toolchain-for-building-rustc, no
+# host-LLVM build. Runs on the free ubuntu-latest runner. See docs/BUILDING.md.
 name: Build rustc.wasm
 
 on:
@@ -30,14 +30,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350   # stay under the 6 h hosted-runner cap
     steps:
-      - name: Checkout bjorn3/rust
-        uses: actions/checkout@v4
-        with:
-          repository: bjorn3/rust
-          ref: ${{ inputs.rust_branch }}
-          submodules: true
-          fetch-depth: 0        # download-ci-llvm walks git history to find the CI LLVM commit
-          path: rust
+      - name: Clone bjorn3/rust
+        # Plain `git clone`, NOT actions/checkout. actions/checkout leaves a detached HEAD with a
+        # narrow refspec, which breaks bootstrap's download-ci-llvm commit detection — it then falls
+        # back to the fork HEAD (bjorn3 commit), for which rust-lang CI has no LLVM artifact → 404.
+        # A normal clone lets bootstrap walk history to the real upstream LLVM commit (which HAS an
+        # artifact), exactly as the working local build does. x.py auto-inits the submodules it needs.
+        run: git clone --branch "${{ inputs.rust_branch }}" https://github.com/bjorn3/rust rust
 
       - name: Checkout this repo (scripts)
         uses: actions/checkout@v4
