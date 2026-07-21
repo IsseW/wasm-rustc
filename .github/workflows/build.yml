@@ -1,0 +1,136 @@
+# Build a cranelift-backed rustc.wasm + sysroots and (optionally) publish them as a Release.
+#
+# Runs on the free ubuntu-latest runner (~3.5 h, under the 6 h cap). The recipe mirrors the proven
+# oligamiq/rust_wasm workflow: reclaim disk, add swap, download WASI SDK 24, and use a PREBUILT host
+# LLVM via `toolchain-for-building-rustc --only-llvm` (so LLVM is never compiled from source, which
+# a hosted runner cannot do). See docs/BUILDING.md. Several artifact paths are marked TODO — verify
+# them against compile_rustc_for_wasm20's build layout on the first run.
+name: Build rustc.wasm
+
+on:
+  workflow_dispatch:
+    inputs:
+      rust_branch:
+        description: bjorn3/rust branch to build
+        default: compile_rustc_for_wasm20
+        required: true
+      tag:
+        description: version tag for the artifacts (e.g. rust-nightly-2026-07)
+        required: true
+      publish:
+        description: also create a GitHub Release from the built artifacts
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # needed only when publish=true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # stay under the 6 h hosted-runner cap
+    steps:
+      - name: Checkout bjorn3/rust
+        uses: actions/checkout@v4
+        with:
+          repository: bjorn3/rust
+          ref: ${{ inputs.rust_branch }}
+          submodules: true
+          path: rust
+
+      - name: Checkout this repo (scripts)
+        uses: actions/checkout@v4
+        with:
+          path: wasm-rustc
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Setup swap (10 GB)
+        uses: thejerrybao/setup-swap-space@v1
+        with:
+          swap-size-gb: 10
+          remove-existing-swap-files: true
+
+      - name: Install host Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install apt deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libclang-dev flex bison ccache zstd
+
+      - name: Install WASI SDK 24
+        working-directory: rust
+        run: |
+          curl -OL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-x86_64-linux.tar.gz
+          tar -xzf wasi-sdk-24.0-x86_64-linux.tar.gz && rm wasi-sdk-24.0-x86_64-linux.tar.gz
+          mv wasi-sdk-24.0-* wasi-sdk
+          echo "WASI_SDK_PATH=$PWD/wasi-sdk" >> "$GITHUB_ENV"
+          echo "WASI_SYSROOT=$PWD/wasi-sdk/share/wasi-sysroot" >> "$GITHUB_ENV"
+
+      - name: Prepare host LLVM + config (no from-source LLVM)
+        working-directory: rust
+        run: |
+          cargo install --git https://github.com/oligamiq/toolchain-for-building-rustc
+          toolchain-for-building-rustc -t wasm32-wasip1 --install -f config.llvm.toml --only-llvm || true
+          # bjorn3's branch ships a cranelift config.toml (host=wasm32-wasip1, codegen-backends=cranelift).
+          # Prefer it; fall back to the generated one. TODO: confirm the branch's config filename.
+          if [ ! -f config.toml ] && [ -f config.llvm.toml ]; then cp config.llvm.toml config.toml; fi
+          echo "=== config.toml (grep) ==="; grep -E 'host|codegen-backends|wasi' config.toml || true
+
+      - name: Patch cg_clif rustc_abi dep if missing
+        working-directory: rust
+        run: |
+          f=compiler/rustc_codegen_cranelift/Cargo.toml
+          if [ -f "$f" ] && ! grep -q 'rustc_abi' "$f"; then
+            printf '\nrustc_abi = { path = "../rustc_abi" }\n' >> "$f"
+            echo "patched $f"
+          fi
+
+      - name: Build rustc.wasm (cranelift) — ~3.5 h
+        working-directory: rust
+        run: ./x.py install --config config.toml
+
+      - name: Build riscv64 no_std sysroot
+        working-directory: rust
+        run: ./x.py build library --target riscv64gc-unknown-none-elf
+
+      - name: Package artifacts
+        env:
+          RUST_DIR: ${{ github.workspace }}/rust
+          OUT_DIR: ${{ github.workspace }}/out
+        run: wasm-rustc/scripts/package-artifacts.sh
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustc-wasm-${{ inputs.tag }}
+          path: out/*.tar.zst
+          retention-days: 7
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS-${{ inputs.tag }}
+          path: out/SHA256SUMS
+          retention-days: 30
+
+      - name: Publish Release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "artifacts-${{ inputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "artifacts-${{ inputs.tag }}" \
+            --notes "cranelift rustc.wasm + sysroots (branch ${{ inputs.rust_branch }}). Paste SHA256SUMS into the site's artifacts.lock." \
+            out/rustc-wasm.tar.zst out/riscv64-sysroot.tar.zst out/std-sysroot.tar.zst out/SHA256SUMS
