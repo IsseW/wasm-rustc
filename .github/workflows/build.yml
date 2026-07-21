@@ -80,6 +80,10 @@ jobs:
           tar -xzf wasi-sdk.tar.gz && rm wasi-sdk.tar.gz
           test -x wasi-sdk-32.0-x86_64-linux/bin/clang
           echo "WASI SDK ready: $(ls -d wasi-sdk-32.0-x86_64-linux)"
+          # bootstrap requires WASI_SDK_PATH as an env var when building a -wasi target on CI
+          # (cc_detect.rs) — the bootstrap.toml relative paths alone aren't accepted there.
+          echo "WASI_SDK_PATH=$PWD/wasi-sdk-32.0-x86_64-linux" >> "$GITHUB_ENV"
+          echo "WASI_SYSROOT=$PWD/wasi-sdk-32.0-x86_64-linux/share/wasi-sysroot" >> "$GITHUB_ENV"
 
       - name: Provide the wild linker (patched to ./wild/libwild)
         working-directory: rust
@@ -91,6 +95,14 @@ jobs:
           git clone https://github.com/wild-linker/wild.git wild
           [ -n "$rev" ] && git -C wild checkout "$rev"
           test -e wild/libwild/Cargo.toml
+
+      - name: Configure riscv64 target (cc=clang, no-std)
+        working-directory: rust
+        run: |
+          # The riscv64 no_std sysroot build wants riscv64-unknown-elf-gcc (absent); use clang instead.
+          sudo apt-get install -y clang
+          grep -q riscv64gc-unknown-none-elf bootstrap.toml || \
+            printf '\n[target."riscv64gc-unknown-none-elf"]\ncc = "clang"\nno-std = true\n' >> bootstrap.toml
 
       - name: Build rustc.wasm (cranelift, prebuilt CI LLVM) — long
         working-directory: rust

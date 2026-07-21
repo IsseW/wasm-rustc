@@ -33,6 +33,10 @@ if [ ! -x "$RUST_DIR/$WASI_DIR/bin/clang" ]; then
   rm -f "$RUST_DIR/wasi-sdk.tar.gz"
 fi
 test -x "$RUST_DIR/$WASI_DIR/bin/clang" && echo "    wasi clang OK"
+# bootstrap REQUIRES this env var (not just bootstrap.toml paths) when building a -wasi target
+# under CI (cc_detect.rs); export it here so build-local.sh matches the CI workflow.
+export WASI_SDK_PATH="$RUST_DIR/$WASI_DIR"
+export WASI_SYSROOT="$RUST_DIR/$WASI_DIR/share/wasi-sysroot"
 
 # The branch patches libwild to a local ./wild/libwild ([patch.crates-io] in Cargo.toml) but does
 # NOT vendor it or list it as a submodule, so we clone wild-linker/wild at the exact rev Cargo.lock
@@ -45,6 +49,19 @@ if [ ! -e "$RUST_DIR/wild/libwild/Cargo.toml" ]; then
   [ -n "$WILD_REV" ] && git -C "$RUST_DIR/wild" checkout --quiet "$WILD_REV"
 fi
 test -e "$RUST_DIR/wild/libwild/Cargo.toml" && echo "    wild/libwild OK"
+
+# Building the riscv64 no_std sysroot wants a target C compiler; the target's default is
+# riscv64-unknown-elf-gcc (not installed). Use clang (a cross-compiler) + mark the target no_std,
+# matching the original 1.83 spike. Appended after checkout so it survives the re-checkout reset.
+echo "==> [2c] configure riscv64 target (cc=clang, no-std)   ($(date '+%H:%M:%S'))"
+if ! grep -q 'riscv64gc-unknown-none-elf' "$RUST_DIR/bootstrap.toml"; then
+  cat >> "$RUST_DIR/bootstrap.toml" <<'TOML'
+
+[target."riscv64gc-unknown-none-elf"]
+cc = "clang"
+no-std = true
+TOML
+fi
 
 echo "==> [3/5] x.py install (download CI LLVM + build cranelift rustc.wasm)   ($(date '+%H:%M:%S'))"
 ( cd "$RUST_DIR" && python3 x.py install )
