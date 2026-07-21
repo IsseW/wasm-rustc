@@ -24,14 +24,33 @@ print(f"  manifest: {out}")
 PY
 }
 
-# --- locate build outputs (TODO: confirm against compile_rustc_for_wasm20's layout) ---
-RUSTC_WASM="$(find "$RUST_DIR" -name rustc.wasm \( -path '*dist*' -o -path '*bin*' \) 2>/dev/null | head -1)"
+pick_dir() { # print first existing dir matching any of the given -path globs, in order
+  local pat d
+  for pat in "$@"; do
+    d="$(find "$RUST_DIR" -type d -path "$pat" 2>/dev/null | sort | head -1)"
+    if [ -n "$d" ]; then echo "$d"; return 0; fi
+  done
+  return 1
+}
+
+# --- locate build outputs ---
+RUSTC_WASM="$(find "$RUST_DIR" -name rustc.wasm -path '*dist*' 2>/dev/null | head -1)"
 [ -n "$RUSTC_WASM" ] || RUSTC_WASM="$(find "$RUST_DIR" -name rustc.wasm 2>/dev/null | head -1)"
 [ -n "$RUSTC_WASM" ] || { echo "error: rustc.wasm not found under $RUST_DIR" >&2; exit 1; }
-RISCV_LIB_SRC="$(find "$RUST_DIR" -type d -path '*rustlib/riscv64gc-unknown-none-elf/lib' 2>/dev/null | head -1)"
-STD_LIB_SRC="$(find "$RUST_DIR" -type d -path '*stage*/lib/rustlib/x86_64-unknown-linux-gnu/lib' 2>/dev/null | head -1)"
-[ -n "$RISCV_LIB_SRC" ] || { echo "error: riscv64 sysroot lib dir not found" >&2; exit 1; }
-[ -n "$STD_LIB_SRC" ]   || { echo "error: x86_64 std lib dir not found" >&2; exit 1; }
+
+# Prefer the installed (dist) sysroot, else the highest stage — NEVER stage0. stage0 is the
+# downloaded beta compiler; its rlib metadata version won't match our rustc.wasm, which would
+# silently break the trainer's --emit metadata type-check.
+RISCV_LIB_SRC="$(pick_dir \
+  '*dist*/rustlib/riscv64gc-unknown-none-elf/lib' \
+  '*stage2*/rustlib/riscv64gc-unknown-none-elf/lib' \
+  '*stage1*/rustlib/riscv64gc-unknown-none-elf/lib')" || true
+STD_LIB_SRC="$(pick_dir \
+  '*dist*/lib/rustlib/x86_64-unknown-linux-gnu/lib' \
+  '*stage2*/lib/rustlib/x86_64-unknown-linux-gnu/lib' \
+  '*stage1*/lib/rustlib/x86_64-unknown-linux-gnu/lib')" || true
+[ -n "$RISCV_LIB_SRC" ] || { echo "error: riscv64 sysroot lib dir not found (non-stage0)" >&2; exit 1; }
+[ -n "$STD_LIB_SRC" ]   || { echo "error: x86_64 std lib dir not found (non-stage0)" >&2; exit 1; }
 echo "rustc.wasm  : $RUSTC_WASM"
 echo "riscv64 lib : $RISCV_LIB_SRC"
 echo "std lib     : $STD_LIB_SRC"

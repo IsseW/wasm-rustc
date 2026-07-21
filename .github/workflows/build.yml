@@ -36,6 +36,7 @@ jobs:
           repository: bjorn3/rust
           ref: ${{ inputs.rust_branch }}
           submodules: true
+          fetch-depth: 0        # download-ci-llvm walks git history to find the CI LLVM commit
           path: rust
 
       - name: Checkout this repo (scripts)
@@ -60,49 +61,53 @@ jobs:
           swap-size-gb: 10
           remove-existing-swap-files: true
 
-      - name: Install host Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
 
-      - name: Install apt deps
+      - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config libclang-dev flex bison ccache zstd
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config zstd
 
-      - name: Install WASI SDK 24
+      - name: Download WASI SDK 32
         working-directory: rust
         run: |
-          curl -OL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-x86_64-linux.tar.gz
-          tar -xzf wasi-sdk-24.0-x86_64-linux.tar.gz && rm wasi-sdk-24.0-x86_64-linux.tar.gz
-          mv wasi-sdk-24.0-* wasi-sdk
-          echo "WASI_SDK_PATH=$PWD/wasi-sdk" >> "$GITHUB_ENV"
-          echo "WASI_SYSROOT=$PWD/wasi-sdk/share/wasi-sysroot" >> "$GITHUB_ENV"
+          # bootstrap.toml references ./wasi-sdk-32.0-x86_64-linux/... relative to this dir.
+          curl -fL -o wasi-sdk.tar.gz \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-32/wasi-sdk-32.0-x86_64-linux.tar.gz
+          tar -xzf wasi-sdk.tar.gz && rm wasi-sdk.tar.gz
+          test -x wasi-sdk-32.0-x86_64-linux/bin/clang
+          echo "WASI SDK ready: $(ls -d wasi-sdk-32.0-x86_64-linux)"
 
-      - name: Prepare host LLVM + config (no from-source LLVM)
+      - name: Provide the wild linker (patched to ./wild/libwild)
         working-directory: rust
         run: |
-          cargo install --git https://github.com/oligamiq/toolchain-for-building-rustc
-          toolchain-for-building-rustc -t wasm32-wasip1 --install -f config.llvm.toml --only-llvm || true
-          # bjorn3's branch ships a cranelift config.toml (host=wasm32-wasip1, codegen-backends=cranelift).
-          # Prefer it; fall back to the generated one. TODO: confirm the branch's config filename.
-          if [ ! -f config.toml ] && [ -f config.llvm.toml ]; then cp config.llvm.toml config.toml; fi
-          echo "=== config.toml (grep) ==="; grep -E 'host|codegen-backends|wasi' config.toml || true
+          # The branch's Cargo.toml has [patch.crates-io] libwild = { path = "wild/libwild" } but
+          # doesn't vendor wild or list it as a submodule — clone it at the rev Cargo.lock pins.
+          rev="$(grep -A3 'name = "libwild"' Cargo.lock | grep -oE 'wild\.git#[0-9a-f]{7,40}' | head -1 | sed 's/.*#//')"
+          echo "wild rev: ${rev:-<none; using default branch>}"
+          git clone https://github.com/wild-linker/wild.git wild
+          [ -n "$rev" ] && git -C wild checkout "$rev"
+          test -e wild/libwild/Cargo.toml
 
-      - name: Patch cg_clif rustc_abi dep if missing
+      - name: Build rustc.wasm (cranelift, prebuilt CI LLVM) — long
         working-directory: rust
         run: |
-          f=compiler/rustc_codegen_cranelift/Cargo.toml
-          if [ -f "$f" ] && ! grep -q 'rustc_abi' "$f"; then
-            printf '\nrustc_abi = { path = "../rustc_abi" }\n' >> "$f"
-            echo "patched $f"
-          fi
-
-      - name: Build rustc.wasm (cranelift) — ~3.5 h
-        working-directory: rust
-        run: ./x.py install --config config.toml
+          # Uses the branch's shipped bootstrap.toml (host=wasm32-wasip1, cranelift, download-ci-llvm).
+          python3 x.py install
 
       - name: Build riscv64 no_std sysroot
         working-directory: rust
-        run: ./x.py build library --target riscv64gc-unknown-none-elf
+        run: python3 x.py build library --target riscv64gc-unknown-none-elf
+
+      - name: Show build tree (diagnostic)
+        working-directory: rust
+        run: |
+          echo "== rustc.wasm =="; find . -name 'rustc.wasm' 2>/dev/null
+          echo "== riscv64 sysroot lib dirs =="; find . -type d -path '*rustlib/riscv64gc-unknown-none-elf/lib' 2>/dev/null
+          echo "== x86_64 std lib dirs =="; find . -type d -path '*lib/rustlib/x86_64-unknown-linux-gnu/lib' 2>/dev/null
 
       - name: Package artifacts
         env:
