@@ -107,11 +107,17 @@ jobs:
         working-directory: rust
         run: |
           # Uses the branch's shipped bootstrap.toml (host=wasm32-wasip1, cranelift, download-ci-llvm).
-          python3 x.py install
+          # Unset GITHUB_ACTIONS/CI so bootstrap uses its NORMAL (non-CI) download-ci-llvm commit
+          # detection. Its GitHub-Actions path assumes the checkout tip is a bors merge commit and
+          # takes HEAD^1 as "upstream" — wrong for a fork branch tip, so it picks a fork commit with
+          # no CI LLVM artifact (404). The non-CI path (author-based bors search) is what the working
+          # local build uses. See src/build_helper/src/git.rs get_closest_upstream_commit.
+          env -u GITHUB_ACTIONS -u CI python3 x.py install
 
       - name: Build riscv64 no_std sysroot
         working-directory: rust
-        run: python3 x.py build library --target riscv64gc-unknown-none-elf
+        # Same GITHUB_ACTIONS/CI unset — this x.py call also resolves download-ci-llvm.
+        run: env -u GITHUB_ACTIONS -u CI python3 x.py build library --target riscv64gc-unknown-none-elf
 
       - name: Show build tree (diagnostic)
         working-directory: rust
