@@ -84,10 +84,22 @@ if [ "$PACKAGE_SET" != "main" ]; then
 WASIP1_LIB_SRC="$(pick_dir '*stage1/lib/rustlib/wasm32-wasip1/lib')" || true
 [ -n "$WASIP1_LIB_SRC" ] || { echo "error: wasm32-wasip1 std lib dir not found in stage1" >&2; exit 1; }
 echo "wasip1 lib  : $WASIP1_LIB_SRC"
-STD_CRATES="std core alloc compiler_builtins panic_abort panic_unwind wasi cfg_if rustc_demangle std_detect hashbrown rustc_std_workspace_core rustc_std_workspace_alloc miniz_oxide adler2 unwind libc"
+STD_CRATES="std core alloc compiler_builtins panic_abort panic_unwind wasi cfg_if rustc_demangle std_detect hashbrown rustc_std_workspace_core rustc_std_workspace_alloc miniz_oxide adler2 unwind libc test getopts unicode_width rustc_std_workspace_std"
 for c in $STD_CRATES; do
-  cp "$WASIP1_LIB_SRC"/lib$c-*.rlib  "$WASIP1_DST/" 2>/dev/null || true
-  cp "$WASIP1_LIB_SRC"/lib$c-*.rmeta "$WASIP1_DST/" 2>/dev/null || true
+  found_rlib=0
+  for rlib in "$WASIP1_LIB_SRC"/lib$c-*.rlib; do
+    [ -e "$rlib" ] || continue
+    found_rlib=1
+    cp "$rlib" "$WASIP1_DST/"
+    # rmeta only for the SAME hash (orphan rmeta from other build units would
+    # create ambiguous-candidate errors)
+    rmeta="${rlib%.rlib}.rmeta"
+    [ -e "$rmeta" ] && cp "$rmeta" "$WASIP1_DST/"
+  done
+  # rmeta-only crates (e.g. unicode_width): metadata suffices for type-checking
+  if [ "$found_rlib" = 0 ]; then
+    cp "$WASIP1_LIB_SRC"/lib$c-*.rmeta "$WASIP1_DST/" 2>/dev/null || true
+  fi
 done
 cp "$WASIP1_LIB_SRC/self-contained/crt1-command.o" "$WASIP1_LIB_SRC/self-contained/libc.a"    "$WASIP1_DST/self-contained/"
 python3 - "$STAGE/rustc/sysroot-wasip1" <<'PY'
