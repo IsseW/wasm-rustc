@@ -10,9 +10,13 @@ name: Build rustc.wasm
 on:
   workflow_dispatch:
     inputs:
-      rust_branch:
-        description: bjorn3/rust branch to build
-        default: compile_rustc_for_wasm20
+      rust_repo:
+        description: rust fork to build (carries the Phase-B changes as commits)
+        default: AngelOnFira/rust
+        required: true
+      rust_ref:
+        description: branch/rev of the fork (riw-wasm20 = bjorn3 wasm20 + Phase B + vendored clif2wasm/riwl)
+        default: riw-wasm20
         required: true
       tag:
         description: version tag for the artifacts (e.g. rust-nightly-2026-07)
@@ -26,17 +30,21 @@ permissions:
   contents: write   # needed only when publish=true
 
 jobs:
+  # The long job: rustc.wasm itself (+ the riscv64 no_std and x86_64 metadata-std
+  # sysroots that ride along in the same tree).
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 350   # stay under the 6 h hosted-runner cap
     steps:
-      - name: Clone bjorn3/rust
+      - name: Clone the rust fork (riw-wasm20)
         # Plain `git clone`, NOT actions/checkout. actions/checkout leaves a detached HEAD with a
         # narrow refspec, which breaks bootstrap's download-ci-llvm commit detection — it then falls
         # back to the fork HEAD (bjorn3 commit), for which rust-lang CI has no LLVM artifact → 404.
         # A normal clone lets bootstrap walk history to the real upstream LLVM commit (which HAS an
         # artifact), exactly as the working local build does. x.py auto-inits the submodules it needs.
-        run: git clone --branch "${{ inputs.rust_branch }}" https://github.com/bjorn3/rust rust
+        run: |
+          git clone https://github.com/${{ inputs.rust_repo }} rust
+          git -C rust checkout "${{ inputs.rust_ref }}"
 
       - name: Checkout this repo (scripts)
         uses: actions/checkout@v4
@@ -84,17 +92,6 @@ jobs:
           echo "WASI_SDK_PATH=$PWD/wasi-sdk-32.0-x86_64-linux" >> "$GITHUB_ENV"
           echo "WASI_SYSROOT=$PWD/wasi-sdk-32.0-x86_64-linux/share/wasi-sysroot" >> "$GITHUB_ENV"
 
-      - name: Provide the wild linker (patched to ./wild/libwild)
-        working-directory: rust
-        run: |
-          # The branch's Cargo.toml has [patch.crates-io] libwild = { path = "wild/libwild" } but
-          # doesn't vendor wild or list it as a submodule — clone it at the rev Cargo.lock pins.
-          rev="$(grep -A3 'name = "libwild"' Cargo.lock | grep -oE 'wild\.git#[0-9a-f]{7,40}' | head -1 | sed 's/.*#//')"
-          echo "wild rev: ${rev:-<none; using default branch>}"
-          git clone https://github.com/wild-linker/wild.git wild
-          [ -n "$rev" ] && git -C wild checkout "$rev"
-          test -e wild/libwild/Cargo.toml
-
       - name: Configure riscv64 target (cc=clang, no-std)
         working-directory: rust
         run: |
@@ -119,25 +116,105 @@ jobs:
         # Same GITHUB_ACTIONS/CI unset — this x.py call also resolves download-ci-llvm.
         run: env -u GITHUB_ACTIONS -u CI python3 x.py build library --target riscv64gc-unknown-none-elf
 
-      - name: Show build tree (diagnostic)
-        working-directory: rust
-        run: |
-          echo "== rustc.wasm =="; find . -name 'rustc.wasm' 2>/dev/null
-          echo "== riscv64 sysroot lib dirs =="; find . -type d -path '*rustlib/riscv64gc-unknown-none-elf/lib' 2>/dev/null
-          echo "== x86_64 std lib dirs =="; find . -type d -path '*lib/rustlib/x86_64-unknown-linux-gnu/lib' 2>/dev/null
-
-      - name: Package artifacts
+      - name: Package artifacts (main set)
         env:
           RUST_DIR: ${{ github.workspace }}/rust
           OUT_DIR: ${{ github.workspace }}/out
+          PACKAGE_SET: main
         run: wasm-rustc/scripts/package-artifacts.sh
 
-      - name: Upload workflow artifacts
+      - name: Upload workflow artifacts (main set)
         uses: actions/upload-artifact@v4
         with:
-          name: rustc-wasm-${{ inputs.tag }}
+          name: main-${{ inputs.tag }}
           path: out/*.tar.zst
           retention-days: 7
+
+  # Parallel job: the wasm32-wasip1 STD sysroot the browser links user programs
+  # against (LLVM-legs, metadata-matched to rustc.wasm) + its single-file bundle.
+  # Duplicates the stage1 host build (the price of parallelism on hosted runners)
+  # but skips the long stage2 wasip1 cross build entirely.
+  wasip1-sysroot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Clone the rust fork (riw-wasm20)
+        run: |
+          git clone https://github.com/${{ inputs.rust_repo }} rust
+          git -C rust checkout "${{ inputs.rust_ref }}"
+
+      - name: Checkout this repo (scripts)
+        uses: actions/checkout@v4
+        with:
+          path: wasm-rustc
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Setup swap (10 GB)
+        uses: thejerrybao/setup-swap-space@v1
+        with:
+          swap-size-gb: 10
+          remove-existing-swap-files: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config zstd
+
+      - name: Download WASI SDK 32
+        working-directory: rust
+        run: |
+          curl -fL -o wasi-sdk.tar.gz \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-32/wasi-sdk-32.0-x86_64-linux.tar.gz
+          tar -xzf wasi-sdk.tar.gz && rm wasi-sdk.tar.gz
+          echo "WASI_SDK_PATH=$PWD/wasi-sdk-32.0-x86_64-linux" >> "$GITHUB_ENV"
+          echo "WASI_SYSROOT=$PWD/wasi-sdk-32.0-x86_64-linux/share/wasi-sysroot" >> "$GITHUB_ENV"
+
+      - name: Build wasm32-wasip1 std sysroot (stage1)
+        working-directory: rust
+        run: env -u GITHUB_ACTIONS -u CI python3 x.py build library --target wasm32-wasip1 --stage 1
+
+      - name: Package artifacts (wasip1 set)
+        env:
+          RUST_DIR: ${{ github.workspace }}/rust
+          OUT_DIR: ${{ github.workspace }}/out
+          PACKAGE_SET: wasip1
+        run: wasm-rustc/scripts/package-artifacts.sh
+
+      - name: Upload workflow artifacts (wasip1 set)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasip1-${{ inputs.tag }}
+          path: out/*.tar.zst
+          retention-days: 7
+
+  # Gather both jobs' tarballs, produce one combined SHA256SUMS, optionally publish.
+  release:
+    needs: [build, wasip1-sysroot]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Combined checksums
+        run: ( cd out && sha256sum *.tar.zst > SHA256SUMS && cat SHA256SUMS )
 
       - name: Upload checksums
         uses: actions/upload-artifact@v4
@@ -154,5 +231,5 @@ jobs:
           gh release create "artifacts-${{ inputs.tag }}" \
             --repo "${{ github.repository }}" \
             --title "artifacts-${{ inputs.tag }}" \
-            --notes "cranelift rustc.wasm + sysroots (branch ${{ inputs.rust_branch }}). Paste SHA256SUMS into the site's artifacts.lock." \
-            out/rustc-wasm.tar.zst out/riscv64-sysroot.tar.zst out/std-sysroot.tar.zst out/SHA256SUMS
+            --notes "PHASE-B forked cranelift rustc.wasm (compiles AND links std via in-process riwl) + sysroots. ${{ inputs.rust_repo }}@${{ inputs.rust_ref }}. Paste SHA256SUMS into the site's artifacts.lock." \
+            out/rustc-wasm.tar.zst out/riscv64-sysroot.tar.zst out/std-sysroot.tar.zst out/wasip1-sysroot.tar.zst out/SHA256SUMS
