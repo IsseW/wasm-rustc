@@ -18,6 +18,14 @@ on:
         description: branch/rev of the fork (riw-wasm20 = bjorn3 wasm20 + Phase B + vendored clif2wasm/riwl)
         default: riw-wasm20
         required: true
+      playground_repo:
+        description: egui playground repo holding the `toolchain/` crate the egui rlibs are built from
+        default: IsseW/egui-playground
+        required: true
+      playground_ref:
+        description: branch/rev of the playground repo
+        default: main
+        required: true
       tag:
         description: version tag for the artifacts (e.g. rust-nightly-2026-07)
         required: true
@@ -195,6 +203,31 @@ jobs:
           PACKAGE_SET: wasip1
         run: wasm-rustc/scripts/package-artifacts.sh
 
+      # The egui rlib set rides along in this job because everything it needs is already here:
+      # the native stage1 built above (rustc inside wasm cannot load proc-macro dylibs, so egui
+      # has to be compiled on the host) and the very wasip1 std that is about to ship. Building
+      # the rlibs against the staged sysroot keeps their metadata matched to it.
+      - name: Checkout the playground (toolchain crate)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.playground_repo }}
+          ref: ${{ inputs.playground_ref }}
+          path: playground
+
+      - name: Build the egui rlib set
+        env:
+          STAGE1_RUSTC: ${{ github.workspace }}/rust/build/host/stage1/bin/rustc
+          STD_SYSROOT: ${{ github.workspace }}/out/stage/rustc/sysroot-wasip1
+          OUT_DIR: ${{ github.workspace }}/out/stage/rustc/sysroot-egui
+          BUILD_DIR: ${{ github.workspace }}/toolchain-target
+        run: playground/toolchain/build-sysroot.sh
+
+      - name: Package the egui sysroot
+        run: |
+          tar --zstd -C out/stage -cf out/egui-sysroot.tar.zst \
+            rustc/sysroot-egui rustc/sysroot-egui.bundle
+          ls -lh out/egui-sysroot.tar.zst
+
       - name: Upload workflow artifacts (wasip1 set)
         uses: actions/upload-artifact@v4
         with:
@@ -232,4 +265,4 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "artifacts-${{ inputs.tag }}" \
             --notes "PHASE-B forked cranelift rustc.wasm (compiles AND links std via in-process riwl) + sysroots. ${{ inputs.rust_repo }}@${{ inputs.rust_ref }}. Paste SHA256SUMS into the site's artifacts.lock." \
-            out/rustc-wasm.tar.zst out/riscv64-sysroot.tar.zst out/std-sysroot.tar.zst out/wasip1-sysroot.tar.zst out/SHA256SUMS
+            out/rustc-wasm.tar.zst out/riscv64-sysroot.tar.zst out/std-sysroot.tar.zst out/wasip1-sysroot.tar.zst out/egui-sysroot.tar.zst out/SHA256SUMS
