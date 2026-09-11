@@ -71,10 +71,14 @@ jobs:
           swap-storage: false
 
       - name: Setup swap (10 GB)
-        uses: thejerrybao/setup-swap-space@v1
-        with:
-          swap-size-gb: 10
-          remove-existing-swap-files: true
+        run: |
+          sudo swapoff -a || true
+          sudo rm -f /swapfile /mnt/swapfile
+          sudo fallocate -l 10G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -168,10 +172,14 @@ jobs:
           swap-storage: false
 
       - name: Setup swap (10 GB)
-        uses: thejerrybao/setup-swap-space@v1
-        with:
-          swap-size-gb: 10
-          remove-existing-swap-files: true
+        run: |
+          sudo swapoff -a || true
+          sudo rm -f /swapfile /mnt/swapfile
+          sudo fallocate -l 10G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
 
       - name: Setup Python
         uses: actions/setup-python@v5
