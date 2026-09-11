@@ -33,6 +33,10 @@ on:
         description: also create a GitHub Release from the built artifacts
         type: boolean
         default: false
+      skip_rustc:
+        description: skip the long rustc.wasm job and build only the sysroots
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # needed only when publish=true
@@ -41,6 +45,7 @@ jobs:
   # The long job: rustc.wasm itself (+ the riscv64 no_std and x86_64 metadata-std
   # sysroots that ride along in the same tree).
   build:
+    if: ${{ !inputs.skip_rustc }}
     runs-on: ubuntu-latest
     timeout-minutes: 350   # stay under the 6 h hosted-runner cap
     steps:
@@ -215,6 +220,13 @@ jobs:
       # the native stage1 built above (rustc inside wasm cannot load proc-macro dylibs, so egui
       # has to be compiled on the host) and the very wasip1 std that is about to ship. Building
       # the rlibs against the staged sysroot keeps their metadata matched to it.
+      # `x.py build library --target wasm32-wasip1` leaves the stage1 sysroot without a host std,
+      # so the proc-macro crates and build scripts the egui rlibs need have nothing to compile
+      # against. Packaging already happened above, so this cannot disturb the shipped sysroot.
+      - name: Build host std for stage1
+        working-directory: rust
+        run: env -u GITHUB_ACTIONS -u CI python3 x.py build library --target x86_64-unknown-linux-gnu --stage 1
+
       - name: Checkout the playground (toolchain crate)
         uses: actions/checkout@v4
         with:
